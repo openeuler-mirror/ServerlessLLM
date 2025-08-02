@@ -155,3 +155,14 @@ class SllmStoreClient:
                 "chunk_size": response.chunk_size,
                 "mem_pool_size": response.mem_pool_size,
             }
+
+    def get_pid(self):
+        """Get the server process ID for CANN IPC setup"""
+        request = storage_pb2.GetPidRequest()
+        try:
+            response = self.stub.GetPid(request)
+            logger.info(f"Server PID {response.pid}")
+            return response.pid
+        except grpc.RpcError as e:
+            logger.error(f"Error getting server PID: {e}")
+            return None

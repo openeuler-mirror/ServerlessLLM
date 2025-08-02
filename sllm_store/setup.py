@@ -17,6 +17,7 @@
 # ---------------------------------------------------------------------------- #
 import io
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -26,29 +27,105 @@ from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.install import install
 
-
-from torch.utils.cpp_extension import CUDA_HOME
-from torch.utils.cpp_extension import ROCM_HOME
+try:
+    torch_available = True
+    # The assert is not needed since Github CI does not use GPU server,
+    # install cuda library is sufficient
+    # assert torch.cuda.is_available() == True
+    from torch.utils.cpp_extension import CUDA_HOME
+    from torch.utils.cpp_extension import ROCM_HOME
+    from torch_npu.utils.cpp_extension import NpuExtension
+except Exception:
+    torch_available = False
+    CUDA_HOME = None
+    ROCM_HOME = None
+    print(
+        "[WARNING] Unable to import torch, pre-compiling ops will be disabled. "
+        "Please visit https://pytorch.org/ to see how to properly install torch on your system."  # noqa: E501
+    )
 
 
 ROOT_DIR = os.path.dirname(__file__)
 
+# Determine build backend based on environment and platform
+def detect_build_backend():
+    """Detect which backend to build based on environment variables and platform."""
+    
+    # Check for explicit backend selection
+    use_cann = os.getenv("USE_CANN", "0").lower() in ("1", "true", "yes")
+    use_cuda = os.getenv("USE_CUDA", "auto").lower()
+    
+    # CANN support (Linux only)
+    ascend_toolkit_home = os.getenv("ASCEND_TOOLKIT_HOME")
+    print("Reached")
+    print(f"HOME: {ascend_toolkit_home}")
+    print(f"USA_CANN {use_cann}")
 
-def check_nvcc_installed(cuda_home: str) -> None:
+    if use_cann and ascend_toolkit_home and platform.system() == "Linux":
+        if check_cann_available(ascend_toolkit_home):
+            print("Reached")
+            return "cann", ascend_toolkit_home
+        else:
+            print("[WARNING] CANN requested but not available, falling back...")
+    
+    # CUDA support
+    if use_cuda != "false" and CUDA_HOME is not None:
+        if check_nvcc_installed(CUDA_HOME):
+            return "cuda", CUDA_HOME
+        else:
+            print("[WARNING] CUDA requested but nvcc not available, falling back...")
+    
+    # ROCm support
+    if ROCM_HOME is not None:
+        if check_hipcc_installed(ROCM_HOME):
+            return "rocm", ROCM_HOME
+        else:
+            print("[WARNING] ROCm available but hipcc not working, falling back...")
+    
+    # CPU-only fallback
+    print("[INFO] Building in CPU-only mode")
+    return "cpu", None
+
+
+def check_cann_available(ascend_toolkit_home: str) -> bool:
+    """Check if CANN toolkit is available."""
+    try:
+        # Check for essential CANN headers
+        include_dir = os.path.join(ascend_toolkit_home, "include")
+        acl_header = os.path.join(include_dir, "acl", "acl.h")
+        
+        if not os.path.exists(acl_header):
+            print(f"[WARNING] CANN header not found: {acl_header}")
+            return False
+            
+        # Check for CANN libraries
+        lib_dir = os.path.join(ascend_toolkit_home, "lib64")
+        acl_lib = os.path.join(lib_dir, "libascendcl.so")
+        
+        if not os.path.exists(acl_lib):
+            print(f"[WARNING] CANN library not found: {acl_lib}")
+            return False
+            
+        print(f"[INFO] CANN toolkit found at: {ascend_toolkit_home}")
+        return True
+    except Exception as e:
+        print(f"[WARNING] Error checking CANN availability: {e}")
+        return False
+
+
+def check_nvcc_installed(cuda_home: str) -> bool:
     """Check if nvcc (NVIDIA CUDA compiler) is installed."""
     try:
         _ = subprocess.check_output(
             [cuda_home + "/bin/nvcc", "-V"], universal_newlines=True
         )
-    except Exception as e:
-        raise RuntimeError(
-            "nvcc is not installed or not found in your PATH. "
-            "Please ensure that the CUDA toolkit is installed and nvcc is available in your PATH."  # noqa: E501
-            f" Error: {e}"
-        ) from None
+        return True
+    except Exception:
+        print("[WARNING] nvcc is not installed or not found in your PATH.")
+        return False
 
 
-def check_hipcc_installed(rocm_home: str) -> None:
+def check_hipcc_installed(rocm_home: str) -> bool:
     """Check if hipcc (AMD HIP compiler) is installed."""
     # can be either <ROCM_HOME>/hip/bin/hipcc or <ROCM_HOME>/bin/hipcc
     hipcc_paths = [rocm_home + "/bin/hipcc", rocm_home + "/hip/bin/hipcc"]
@@ -57,29 +134,24 @@ def check_hipcc_installed(rocm_home: str) -> None:
             _ = subprocess.check_output(
                 [hipcc, "--version"], universal_newlines=True
             )
-            return
+            return True
         except Exception:
             continue
-    raise RuntimeError(
-        "hipcc is not installed or not found in your PATH. "
-        "Please ensure that the HIP toolkit is installed and hipcc is available in your PATH."  # noqa: E501
-    ) from None
+    print("[WARNING] hipcc is not installed or not found in your PATH.")
+    return False
 
 
-if CUDA_HOME is not None:
-    check_nvcc_installed(CUDA_HOME)
-elif ROCM_HOME is not None:
-    check_hipcc_installed(ROCM_HOME)
-else:
-    raise RuntimeError(
-        "CUDA_HOME or ROCM_HOME environment variable must be set to compile CUDA or HIP extensions."  # noqa: E501
-    )
-
+# Detect build backend
+BUILD_BACKEND, BACKEND_HOME = detect_build_backend()
+print(f"[INFO] Building with backend: {BUILD_BACKEND}")
 
 def is_ninja_available() -> bool:
+    # Allow disabling ninja via environment variable
+    if os.getenv("DISABLE_NINJA", "0").lower() in ("1", "true", "yes"):
+        return False
     try:
         subprocess.run(["ninja", "--version"], stdout=subprocess.PIPE)
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         return False
     return True
 
@@ -138,6 +210,7 @@ class CMakeExtension(Extension):
 
 
 # Adapted from https://github.com/vllm-project/vllm/blob/a1242324c99ff8b1e29981006dfb504da198c7c3/setup.py
+# Pass -DUSE_CANN=ON to the cmake command to build the extension with CANN support.
 class cmake_build_ext(build_ext):
     did_config: Dict[str, bool] = {}
 
@@ -161,6 +234,27 @@ class cmake_build_ext(build_ext):
             "-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}".format(self.build_temp),
         ]
 
+        # Add backend-specific arguments
+        if BUILD_BACKEND == "cann":
+            cmake_args.extend([
+                "-DUSE_CANN=ON",
+                "-DASCEND_TOOLKIT_HOME={}".format(BACKEND_HOME),
+            ])
+        elif BUILD_BACKEND == "cuda":
+            cmake_args.extend([
+                "-DUSE_CUDA=ON",
+                "-DCUDA_TOOLKIT_ROOT_DIR={}".format(BACKEND_HOME),
+            ])
+        elif BUILD_BACKEND == "rocm":
+            cmake_args.extend([
+                "-DUSE_ROCM=ON",
+                "-DROCM_ROOT={}".format(BACKEND_HOME),
+            ])
+        else:  # cpu
+            cmake_args.extend([
+                "-DUSE_CPU_ONLY=ON",
+            ])
+
         # verbose = bool(int(os.getenv('VERBOSE', '1')))
         verbose = True
         if verbose:
@@ -180,10 +274,15 @@ class cmake_build_ext(build_ext):
             # Default build tool to whatever cmake picks.
             build_tool = []
 
-        subprocess.check_call(
-            ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp,
-        )
+        try:
+            subprocess.check_call(
+                ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
+                cwd=self.build_temp,
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] CMake configuration failed with backend {BUILD_BACKEND}")
+            print(f"[ERROR] Command: cmake {ext.cmake_lists_dir} {' '.join(build_tool)} {' '.join(cmake_args)}")
+            raise e
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working
@@ -212,7 +311,12 @@ class cmake_build_ext(build_ext):
                 # str(num_jobs)
             ]
 
-            subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
+            try:
+                subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
+                print(f"[INFO] Successfully built extension: {ext_target_name}")
+            except subprocess.CalledProcessError as e:
+                print(f"[ERROR] Failed to build extension: {ext_target_name}")
+                raise e
             print(self.build_temp, ext_target_name)
 
 

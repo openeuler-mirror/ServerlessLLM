@@ -205,6 +205,13 @@ class StorageServicer(storage_pb2_grpc.StorageServicer):
             chunk_size=self.storage.get_chunk_size(),
         )
 
+    async def GetPid(self, request, context):
+        """Return the current process ID for cann IPC setup"""
+        import acl
+        pid, ret = acl.rt.device_get_bare_tgid()
+        logger.info(f"GetPid called, returning PID: {pid}")
+        return storage_pb2.GetPidResponse(pid=pid)
+
 
 async def serve(
     host,

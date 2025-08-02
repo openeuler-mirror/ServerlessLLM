@@ -17,7 +17,12 @@
 //  ----------------------------------------------------------------------------
 #pragma once
 
+#ifdef USE_CANN
+#include <acl/acl.h>
+#include <acl/acl_rt.h>
+#else
 #include <cuda_runtime.h>
+#endif
 #include <errno.h>
 #include <glog/logging.h>
 #include <string.h>

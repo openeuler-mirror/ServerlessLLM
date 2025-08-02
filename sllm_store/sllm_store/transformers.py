@@ -16,23 +16,24 @@
 #  limitations under the License.                                              #
 # ---------------------------------------------------------------------------- #
 import concurrent.futures
+import importlib
 import json
 import os
 import time
 import uuid
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Union
 
 import torch
+import torch_npu
 from accelerate import dispatch_model, init_empty_weights
 
 # from accelerate.hooks import add_hook_to_module
 from accelerate.utils import set_module_tensor_to_device
-from sllm_store._C import (
-    allocate_cuda_memory,
-    get_cuda_memory_handles,
-    get_device_uuid_map,
-    restore_tensors,
-)
+from peft import LoraConfig, PeftModel, get_peft_model, get_peft_model_state_dict
+from peft.utils import set_peft_model_state_dict
+from sllm_store._C import get_device_uuid_map, restore_tensors
+from sllm_store._C import start_profiling
+
 from sllm_store.client import SllmStoreClient
 from sllm_store.device_map_utils import (
     DeviceMapType,
@@ -49,21 +50,24 @@ from sllm_store.utils import (
     get_no_split_modules,
     get_tied_no_split_modules,
     send_module_buffers_to_device,
-    quantize,
 )
 from torch import nn
 from transformers import AutoConfig
-import importlib
-from peft import (
-    PeftModel,
-    get_peft_model,
-    get_peft_model_state_dict,
-    LoraConfig,
+from transformers.integrations.bitsandbytes import (
+    replace_with_bnb_linear,
+    set_module_quantized_tensor_to_device,
 )
-from peft.utils import set_peft_model_state_dict
-from transformers.utils.quantization_config import (
-    QuantizationConfigMixin,
-)
+
+try:
+    from sllm_store.cann_utils import get_device_type, get_memory_functions
+    allocate_memory, get_memory_handles = get_memory_functions()
+    device_type = get_device_type()
+    from sllm_store._C import create_pointer_capsule
+except ImportError:
+    from sllm_store._C import allocate_cuda_memory as allocate_memory
+    from sllm_store._C import get_cuda_memory_handles as get_memory_handles
+
+    device_type = "cuda"
 
 logger = init_logger(__name__)
 
@@ -112,7 +116,7 @@ def save_lora(model: PeftModel, lora_path: str):
     if not os.path.exists(lora_path):
         os.makedirs(lora_path, exist_ok=True)
 
-    model = model.to("cpu")
+    model = model.cpu()
 
     lora_state_dict = get_peft_model_state_dict(model)
 
@@ -140,9 +144,7 @@ def load_model(
     model_path: Optional[Union[str, os.PathLike]],
     device_map: DeviceMapType = "auto",
     torch_dtype: Optional[torch.dtype] = None,
-    quantization_config: Optional[
-        Union[QuantizationConfigMixin, Dict[str, Any]]
-    ] = None,
+    quantization_config=None,
     storage_path: Optional[str] = None,
     fully_parallel: bool = False,
     hf_model_class: str = "AutoModelForCausalLM",
@@ -173,9 +175,7 @@ def fully_parallel_load(
     hf_model_class: str,
     device_map: DeviceMapType = "auto",
     torch_dtype: Optional[torch.dtype] = None,
-    quantization_config: Optional[
-        Union[QuantizationConfigMixin, Dict[str, Any]]
-    ] = None,
+    quantization_config=None,
     storage_path: Optional[str] = None,
 ):
     if not storage_path:
@@ -228,19 +228,42 @@ def fully_parallel_load(
         logger.debug(f"load model takes {time.time() - start} seconds")
 
         replica_uuid, state_dict = future.result()
+    
+    # # synchronize
+    # client = SllmStoreClient("127.0.0.1:8073")
+    # client.confirm_model_loaded(model_path, replica_uuid)
+    # start_profiling()
 
     with torch.no_grad():
         if quantization_config and torch.cuda.is_available():
-            model = quantize(
-                model,
-                state_dict,
-                quantization_config,
-                torch_dtype,
-                device_map,
-                model_path,
-                replica_uuid,
-                logger,
+            from transformers import BitsAndBytesConfig
+
+            if not isinstance(quantization_config, BitsAndBytesConfig):
+                raise ValueError(
+                    f"Invalid config type: {type(quantization_config)}"
+                )
+
+            logger.debug(
+                f"using precision: {quantization_config.quantization_method()}"
             )
+
+            if quantization_config.llm_int8_enable_fp32_cpu_offload:
+                logger.debug("Offloading is not supported yet")
+                quantization_config.llm_int8_enable_fp32_cpu_offload = False
+
+            has_torch_dtype = torch_dtype is not None
+            model = replace_with_bnb_linear(
+                model, quantization_config=quantization_config
+            )
+
+            for name, param in state_dict.items():
+                final_device = param.device
+                if not has_torch_dtype:
+                    param = param.to(torch.float16)
+
+                set_module_quantized_tensor_to_device(
+                    model, name, final_device, param.to("cpu")
+                )
         else:
             if quantization_config is not None:
                 logger.debug(
@@ -254,9 +277,9 @@ def fully_parallel_load(
     dispatch_model(
         model, device_map, skip_keys=model._skip_keys_device_placement
     )
+
     client = SllmStoreClient("127.0.0.1:8073")
     client.confirm_model_loaded(model_path, replica_uuid)
-    model.hf_device_map = device_map
     model.eval()
     return model
 
@@ -266,9 +289,7 @@ def best_effort_load(
     hf_model_class: str,
     device_map: DeviceMapType = "auto",
     torch_dtype: Optional[torch.dtype] = None,
-    quantization_config: Optional[
-        Union[QuantizationConfigMixin, Dict[str, Any]]
-    ] = None,
+    quantization_config=None,
     storage_path: Optional[str] = None,
 ):
     client = SllmStoreClient("127.0.0.1:8073")
@@ -341,9 +362,17 @@ def best_effort_load(
         expanded_device_map, tensor_data_index
     )
     # logger.debug(f"calculate_device_memory {device_memory}")
-    cuda_memory_ptrs = allocate_cuda_memory(device_memory)
+    cuda_memory_ptrs = allocate_memory(device_memory)
     # cuda_memory_ptrs = { k: [v] for k,v in cuda_memory_ptrs.items()}
-    cuda_memory_handles = get_cuda_memory_handles(cuda_memory_ptrs)
+    if device_type == "npu":
+        cuda_memory_handles, updated_ptrs = get_memory_handles(
+            cuda_memory_ptrs
+        )
+        memory_ptrs_for_restore = updated_ptrs
+    else:
+        cuda_memory_handles = get_memory_handles(cuda_memory_ptrs)
+        memory_ptrs_for_restore = cuda_memory_ptrs
+
     device_uuid_map = get_device_uuid_map()
     # logger.debug(f"determine device_uuid_map {device_uuid_map}")
     tensor_device_offsets, tensor_copy_chunks = calculate_tensor_device_offsets(
@@ -368,23 +397,53 @@ def best_effort_load(
 
     # load model state_dict
     start = time.time()
+    # Use the prepared memory_ptrs_for_restore
+    if device_type == "npu":
+        # For NPU, updated_ptrs is {int: int(uintptr)}, convert to capsules
+        memory_ptrs = {
+            k: create_pointer_capsule(v)
+            for k, v in memory_ptrs_for_restore.items()
+        }
+    else:
+        memory_ptrs = memory_ptrs_for_restore  # CUDA returns map<int, void*>
     state_dict = restore_tensors(
-        tensor_meta_index, cuda_memory_ptrs, tensor_device_offsets
+        tensor_meta_index, memory_ptrs, tensor_device_offsets
     )
     logger.info(f"restore state_dict takes {time.time() - start} seconds")
 
     with torch.no_grad():
         if quantization_config and torch.cuda.is_available():
-            model = quantize(
-                model,
-                state_dict,
-                quantization_config,
-                torch_dtype,
-                device_map,
-                model_path,
-                replica_uuid,
-                logger,
+            from transformers import BitsAndBytesConfig
+
+            if not isinstance(quantization_config, BitsAndBytesConfig):
+                raise ValueError(
+                    f"Invalid config type: {type(quantization_config)}"
+                )
+
+            logger.debug(
+                f"using precision: {quantization_config.quantization_method()}"
             )
+
+            if quantization_config.llm_int8_enable_fp32_cpu_offload:
+                logger.debug("Offloading is not supported yet")
+                quantization_config.llm_int8_enable_fp32_cpu_offload = False
+
+            model = replace_with_bnb_linear(
+                model, quantization_config=quantization_config
+            )
+
+            client.confirm_model_loaded(model_path, replica_uuid)
+
+            for name, param in state_dict.items():
+                if (
+                    param.dtype not in [torch.uint8, torch.int8]
+                    and torch_dtype is None
+                ):
+                    param = param.to(torch.float16)
+
+                set_module_quantized_tensor_to_device(
+                    model, name, param.device, param
+                )
         else:
             if quantization_config is not None:
                 logger.debug(

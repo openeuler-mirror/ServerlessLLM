@@ -1,19 +1,19 @@
 # ---------------------------------------------------------------------------- #
-#  ServerlessLLM                                                               #
-#  Copyright (c) ServerlessLLM Team 2024                                       #
+#   ServerlessLLM                                                              #
+#   Copyright (c) ServerlessLLM Team 2024                                      #
 #                                                                              #
-#  Licensed under the Apache License, Version 2.0 (the "License");             #
-#  you may not use this file except in compliance with the License.            #
+#   Licensed under the Apache License, Version 2.0 (the "License");            #
+#   you may not use this file except in compliance with the License.           #
 #                                                                              #
-#  You may obtain a copy of the License at                                     #
+#   You may obtain a copy of the License at                                    #
 #                                                                              #
-#                  http://www.apache.org/licenses/LICENSE-2.0                  #
+#                   http://www.apache.org/licenses/LICENSE-2.0                 #
 #                                                                              #
-#  Unless required by applicable law or agreed to in writing, software         #
-#  distributed under the License is distributed on an "AS IS" BASIS,           #
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.    #
-#  See the License for the specific language governing permissions and         #
-#  limitations under the License.                                              #
+#   Unless required by applicable law or agreed to in writing, software        #
+#   distributed under the License is distributed on an "AS IS" BASIS,          #
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
+#   See the License for the specific language governing permissions and        #
+#   limitations under the License.                                             #
 # ---------------------------------------------------------------------------- #
 import json
 import os
@@ -23,10 +23,15 @@ from typing import Dict, Optional, Union
 
 import torch
 
+# Import torch_npu BEFORE importing our C++ extension to ensure PrivateUse1HooksInterface is registered
+try:
+    import torch_npu
+    print("torch_npu imported successfully - PrivateUse1HooksInterface should be registered")
+except ImportError:
+    print("torch_npu not available, NPU operations may fail")
+
 # from accelerate.hooks import add_hook_to_module
 from sllm_store._C import (
-    allocate_cuda_memory,
-    get_cuda_memory_handles,
     get_device_uuid_map,
     restore_tensors,
     save_tensors,
@@ -38,6 +43,16 @@ from sllm_store.utils import (
     calculate_device_memory,
     calculate_tensor_device_offsets,
 )
+
+try:
+    from sllm_store.cann_utils import get_memory_functions, get_device_type
+    allocate_memory, get_memory_handles = get_memory_functions()
+    device_type = get_device_type()
+    from sllm_store._C import create_pointer_capsule
+except ImportError:
+    # Fallback to CUDA
+    from sllm_store._C import allocate_cuda_memory as allocate_memory, get_cuda_memory_handles as get_memory_handles
+    device_type = "cuda"
 
 logger = init_logger(__name__)
 
@@ -126,15 +141,22 @@ def load_dict_non_blocking(
         expanded_device_map, tensor_data_index
     )
     # logger.debug(f"calculate_device_memory {device_memory}")
-    cuda_memory_ptrs = allocate_cuda_memory(device_memory)
-    # cuda_memory_ptrs = { k: [v] for k,v in cuda_memory_ptrs.items()}
-    cuda_memory_handles = get_cuda_memory_handles(cuda_memory_ptrs)
+    memory_ptrs = allocate_memory(device_memory)
+    if device_type == "npu":
+        memory_handles, updated_ptrs = get_memory_handles(memory_ptrs)
+        memory_ptrs_for_restore = updated_ptrs
+    else:
+        memory_handles = get_memory_handles(memory_ptrs)
+        memory_ptrs_for_restore = memory_ptrs
+
     device_uuid_map = get_device_uuid_map()
     # logger.debug(f"determine device_uuid_map {device_uuid_map}")
     tensor_device_offsets, tensor_copy_chunks = calculate_tensor_device_offsets(
         expanded_device_map, tensor_data_index
     )
-    logger.debug(f"allocate_cuda_memory takes {time.time() - start} seconds")
+    logger.debug(
+        f"allocate_{device_type}_memory takes {time.time() - start} seconds"
+    )
 
     replica_uuid = _get_uuid()
     ret = client.load_into_gpu(
@@ -146,7 +168,7 @@ def load_dict_non_blocking(
         },
         {
             device_uuid_map[device_id]: [v]
-            for device_id, v in cuda_memory_handles.items()
+            for device_id, v in memory_handles.items()
         },
     )
     if not ret:
@@ -154,8 +176,12 @@ def load_dict_non_blocking(
 
     # load model state_dict
     start = time.time()
+    if device_type == "npu":
+        memory_ptrs = {k: create_pointer_capsule(v) for k, v in memory_ptrs_for_restore.items()}
+    else:
+        memory_ptrs = memory_ptrs_for_restore
     state_dict = restore_tensors(
-        tensor_meta_index, cuda_memory_ptrs, tensor_device_offsets
+        tensor_meta_index, memory_ptrs, tensor_device_offsets
     )
     logger.info(f"restore state_dict takes {time.time() - start} seconds")
 

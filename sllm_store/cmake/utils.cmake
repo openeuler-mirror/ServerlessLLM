@@ -3,7 +3,7 @@
 # Attempt to find the python package that uses the same python executable as
 # `EXECUTABLE` and is one of the `SUPPORTED_VERSIONS`.
 #
-macro (find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
+macro(find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
   file(REAL_PATH ${EXECUTABLE} EXECUTABLE)
   set(Python_EXECUTABLE ${EXECUTABLE})
   find_package(Python COMPONENTS Interpreter Development.Module)
@@ -21,11 +21,11 @@ macro (find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
 endmacro()
 
 #
-# Run `EXPR` in python.  The standard output of python is stored in `OUT` and
-# has trailing whitespace stripped.  If an error is encountered when running
+# Run `EXPR` in python. The standard output of python is stored in `OUT` and
+# has trailing whitespace stripped. If an error is encountered when running
 # python, a fatal message `ERR_MSG` is issued.
 #
-function (run_python OUT EXPR ERR_MSG)
+function(run_python OUT EXPR ERR_MSG)
   execute_process(
     COMMAND
     "${Python_EXECUTABLE}" "-c" "${EXPR}"
@@ -42,7 +42,7 @@ endfunction()
 
 # Run `EXPR` in python after importing `PKG`. Use the result of this to extend
 # `CMAKE_PREFIX_PATH` so the torch cmake configuration can be imported.
-macro (append_cmake_prefix_path PKG EXPR)
+macro(append_cmake_prefix_path PKG EXPR)
   run_python(_PREFIX_PATH
     "import ${PKG}; print(${EXPR})" "Failed to locate ${PKG} path")
   list(APPEND CMAKE_PREFIX_PATH ${_PREFIX_PATH})
@@ -56,7 +56,7 @@ endmacro()
 # CXX_SRCS - List of C++ source files that should not be hipified. (e.g., no CUDA code)
 # CXX_SRCS are removed from the list of ORIG_SRCS, in order to fix issue #206.
 #
-function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS CXX_SRCS)
+function(hipify_sources_target OUT_SRCS NAME ORIG_SRCS CXX_SRCS)
   #
   # Split into C++ and non-C++ (i.e. CUDA) sources.
   #
@@ -73,12 +73,12 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS CXX_SRCS)
   # `CMAKE_CURRENT_BINARY_DIR` directory rather than the original csrc dir.
   #
   set(HIP_SRCS)
-  foreach (SRC ${SRCS})
+  foreach(SRC ${SRCS})
     set(ORIGINAL_SRC ${SRC})
-    string(REGEX REPLACE "\.cu$" "\.hip" SRC ${SRC})
+    string(REGEX REPLACE "\\.cu$" "\\.hip" SRC ${SRC})
     string(REGEX REPLACE "cuda" "hip" SRC ${SRC})
     if(${SRC} STREQUAL ${ORIGINAL_SRC})
-      string(REGEX REPLACE "\.cpp$" "_hip\.cpp" SRC ${SRC})
+      string(REGEX REPLACE "\\.cpp$" "_hip\\.cpp" SRC ${SRC})
     endif()
     list(APPEND HIP_SRCS "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
   endforeach()
@@ -99,8 +99,8 @@ endfunction()
 #
 # Get additional GPU compiler flags from torch.
 #
-function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
-  if (${GPU_LANG} STREQUAL "CUDA")
+function(get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
+  if(${GPU_LANG} STREQUAL "CUDA")
     #
     # Get common NVCC flags from torch.
     #
@@ -108,10 +108,10 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
       "from torch.utils.cpp_extension import COMMON_NVCC_FLAGS; print(';'.join(COMMON_NVCC_FLAGS))"
       "Failed to determine torch nvcc compiler flags")
 
-    if (CUDA_VERSION VERSION_GREATER_EQUAL 11.8)
+    if(CUDA_VERSION VERSION_GREATER_EQUAL 11.8)
       list(APPEND GPU_FLAGS "-DENABLE_FP8")
     endif()
-    if (CUDA_VERSION VERSION_GREATER_EQUAL 12.0)
+    if(CUDA_VERSION VERSION_GREATER_EQUAL 12.0)
       list(REMOVE_ITEM GPU_FLAGS
         "-D__CUDA_NO_HALF_OPERATORS__"
         "-D__CUDA_NO_HALF_CONVERSIONS__"
@@ -140,7 +140,7 @@ endfunction()
 
 # Macro for converting a `gencode` version number to a cmake version number.
 macro(string_to_ver OUT_VER IN_STR)
-  string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
+  string(REGEX REPLACE "([0-9]+)([0-9])" "\\1.\\2" ${OUT_VER} ${IN_STR})
 endmacro()
 
 #
@@ -154,7 +154,7 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
   set(_GPU_SUPPORTED_ARCHES_LIST ${GPU_SUPPORTED_ARCHES} ${ARGN})
   message(STATUS "${GPU_LANG} supported arches: ${_GPU_SUPPORTED_ARCHES_LIST}")
 
-  if (${GPU_LANG} STREQUAL "HIP")
+  if(${GPU_LANG} STREQUAL "HIP")
     #
     # `GPU_ARCHES` controls the `--offload-arch` flags.
     # `CMAKE_HIP_ARCHITECTURES` is set up by torch and can be controlled
@@ -166,8 +166,8 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
     # set the module architecture flags.
     #
     set(${GPU_ARCHES})
-    foreach (_ARCH ${CMAKE_HIP_ARCHITECTURES})
-      if (_ARCH IN_LIST _GPU_SUPPORTED_ARCHES_LIST)
+    foreach(_ARCH ${CMAKE_HIP_ARCHITECTURES})
+      if(_ARCH IN_LIST _GPU_SUPPORTED_ARCHES_LIST)
         list(APPEND ${GPU_ARCHES} ${_ARCH})
       endif()
     endforeach()
@@ -183,13 +183,13 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
     # Setup/process CUDA arch flags.
     #
     # The torch cmake setup hardcodes the detected architecture flags in
-    # `CMAKE_CUDA_FLAGS`.  Since `CMAKE_CUDA_FLAGS` is a "global" variable, it
+    # `CMAKE_CUDA_FLAGS`. Since `CMAKE_CUDA_FLAGS` is a "global" variable, it
     # can't modified on a per-target basis, e.g. for the `punica` extension.
     # So, all the `-gencode` flags need to be extracted and removed from
     # `CMAKE_CUDA_FLAGS` for processing so they can be passed by another method.
     # Since it's not possible to use `target_compiler_options` for adding target
     # specific `-gencode` arguments, the target's `CUDA_ARCHITECTURES` property
-    # must be used instead.  This requires repackaging the architecture flags
+    # must be used instead. This requires repackaging the architecture flags
     # into a format that cmake expects for `CUDA_ARCHITECTURES`.
     #
     # This is a bit fragile in that it depends on torch using `-gencode` as opposed
@@ -211,7 +211,7 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
 
     # If this error is triggered, it might mean that torch has changed how it sets
     # up nvcc architecture code generation flags.
-    if (NOT _CUDA_ARCH_FLAGS)
+    if(NOT _CUDA_ARCH_FLAGS)
       message(FATAL_ERROR
         "Could not find any architecture related code generation flags in "
         "CMAKE_CUDA_FLAGS. (${CMAKE_CUDA_FLAGS})")
@@ -230,34 +230,34 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
       # Note: if a regex matches then `CMAKE_MATCH_1` holds the binding
       # for that match.
 
-      string(REGEX MATCH "arch=compute_\([0-9]+a?\)" _COMPUTE ${_ARCH})
-      if (_COMPUTE)
+      string(REGEX MATCH "arch=compute_([0-9]+a?)" _COMPUTE ${_ARCH})
+      if(_COMPUTE)
         set(_COMPUTE ${CMAKE_MATCH_1})
       endif()
 
-      string(REGEX MATCH "code=sm_\([0-9]+a?\)" _SM ${_ARCH})
-      if (_SM)
+      string(REGEX MATCH "code=sm_([0-9]+a?)" _SM ${_ARCH})
+      if(_SM)
         set(_SM ${CMAKE_MATCH_1})
       endif()
 
-      string(REGEX MATCH "code=compute_\([0-9]+a?\)" _CODE ${_ARCH})
-      if (_CODE)
+      string(REGEX MATCH "code=compute_([0-9]+a?)" _CODE ${_ARCH})
+      if(_CODE)
         set(_CODE ${CMAKE_MATCH_1})
       endif()
 
       # Make sure the virtual architecture can be matched.
-      if (NOT _COMPUTE)
+      if(NOT _COMPUTE)
         message(FATAL_ERROR
           "Could not determine virtual architecture from: ${_ARCH}.")
       endif()
 
       # One of sm_ or compute_ must exist.
-      if ((NOT _SM) AND (NOT _CODE))
+      if((NOT _SM) AND (NOT _CODE))
         message(FATAL_ERROR
           "Could not determine a codegen architecture from: ${_ARCH}.")
       endif()
 
-      if (_SM)
+      if(_SM)
         # -real suffix let CMake to only generate elf code for the kernels.
         # we want this, otherwise the added ptx (default) will increase binary size.
         set(_VIRT "-real")
@@ -270,7 +270,7 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
 
       # Check if the current version is in the supported arch list.
       string_to_ver(_CODE_VER ${_CODE_ARCH})
-      if (NOT _CODE_VER IN_LIST _GPU_SUPPORTED_ARCHES_LIST)
+      if(NOT _CODE_VER IN_LIST _GPU_SUPPORTED_ARCHES_LIST)
         message(STATUS "discarding unsupported CUDA arch ${_VER}.")
         continue()
       endif()
@@ -286,30 +286,30 @@ endmacro()
 # Define a target named `GPU_MOD_NAME` for a single extension. The
 # arguments are:
 #
-# DESTINATION <dest>         - Module destination directory.
-# LANGUAGE <lang>            - The GPU language for this module, e.g CUDA, HIP,
-#                              etc.
-# SOURCES <sources>          - List of source files relative to CMakeLists.txt
-#                              directory.
+# DESTINATION <dest>           - Module destination directory.
+# LANGUAGE <lang>              - The GPU language for this module, e.g CUDA, HIP,
+#                                 etc.
+# SOURCES <sources>            - List of source files relative to CMakeLists.txt
+#                                 directory.
 #
 # Optional arguments:
 #
-# ARCHITECTURES <arches>     - A list of target GPU architectures in cmake
-#                              format.
-#                              Refer `CMAKE_CUDA_ARCHITECTURES` documentation
-#                              and `CMAKE_HIP_ARCHITECTURES` for more info.
-#                              ARCHITECTURES will use cmake's defaults if
-#                              not provided.
-# COMPILE_FLAGS <flags>      - Extra compiler flags passed to NVCC/hip.
+# ARCHITECTURES <arches>       - A list of target GPU architectures in cmake
+#                                 format.
+#                                 Refer `CMAKE_CUDA_ARCHITECTURES` documentation
+#                                 and `CMAKE_HIP_ARCHITECTURES` for more info.
+#                                 ARCHITECTURES will use cmake's defaults if
+#                                 not provided.
+# COMPILE_FLAGS <flags>        - Extra compiler flags passed to NVCC/hip.
 # INCLUDE_DIRECTORIES <dirs> - Extra include directories.
-# LIBRARIES <libraries>      - Extra link libraries.
-# WITH_SOABI                 - Generate library with python SOABI suffix name.
-# CXX_SRCS                   - List of C++ sources files to not be hipified.
-#                              Usually means they shouldn't contain CUDA code.
+# LIBRARIES <libraries>        - Extra link libraries.
+# WITH_SOABI                   - Generate library with python SOABI suffix name.
+# CXX_SRCS                     - List of C++ sources files to not be hipified.
+#                                 Usually means they shouldn't contain CUDA code.
 #
 # Note: optimization level/debug info is set via cmake build type.
 #
-function (define_gpu_extension_target GPU_MOD_NAME)
+function(define_gpu_extension_target GPU_MOD_NAME)
   cmake_parse_arguments(PARSE_ARGV 1
     GPU
     "WITH_SOABI"
@@ -318,11 +318,11 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   )
 
   # Add hipify preprocessing step when building with HIP/ROCm.
-  if (GPU_LANGUAGE STREQUAL "HIP")
+  if(GPU_LANGUAGE STREQUAL "HIP")
     hipify_sources_target(GPU_SOURCES ${GPU_MOD_NAME} "${GPU_SOURCES}" "${GPU_CXX_SRCS}")
   endif()
 
-  if (GPU_WITH_SOABI)
+  if(GPU_WITH_SOABI)
     set(GPU_WITH_SOABI WITH_SOABI)
   else()
     set(GPU_WITH_SOABI)
@@ -330,12 +330,12 @@ function (define_gpu_extension_target GPU_MOD_NAME)
 
   Python_add_library(${GPU_MOD_NAME} MODULE "${GPU_SOURCES}" ${GPU_WITH_SOABI})
 
-  if (GPU_LANGUAGE STREQUAL "HIP")
+  if(GPU_LANGUAGE STREQUAL "HIP")
     # Make this target dependent on the hipify preprocessor step.
     add_dependencies(${GPU_MOD_NAME} hipify${GPU_MOD_NAME})
   endif()
 
-  if (GPU_ARCHITECTURES)
+  if(GPU_ARCHITECTURES)
     set_target_properties(${GPU_MOD_NAME} PROPERTIES
       ${GPU_LANGUAGE}_ARCHITECTURES "${GPU_ARCHITECTURES}")
   endif()
@@ -356,9 +356,23 @@ function (define_gpu_extension_target GPU_MOD_NAME)
 
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.
-  if (GPU_LANGUAGE STREQUAL "CUDA")
+  if(GPU_LANGUAGE STREQUAL "CUDA")
     target_link_libraries(${GPU_MOD_NAME} PRIVATE ${CUDA_CUDA_LIB}
       ${CUDA_LIBRARIES})
+  elseif(GPU_LANGUAGE STREQUAL "CANN")
+    # Set RPATH for CANN libraries
+    if(DEFINED ENV{ASCEND_TOOLKIT_HOME})
+      set_target_properties(${GPU_MOD_NAME} PROPERTIES
+        BUILD_RPATH "$ENV{ASCEND_TOOLKIT_HOME}/lib64"
+        INSTALL_RPATH "$ENV{ASCEND_TOOLKIT_HOME}/lib64"
+        INSTALL_RPATH_USE_LINK_PATH TRUE)
+    else()
+      set_target_properties(${GPU_MOD_NAME} PROPERTIES
+        BUILD_RPATH "/usr/local/Ascend/ascend-toolkit/latest/lib64"
+        INSTALL_RPATH "/usr/local/Ascend/ascend-toolkit/latest/lib64"
+        INSTALL_RPATH_USE_LINK_PATH TRUE)
+    endif()
+    target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES} ${GPU_LIBRARIES} )
   else()
     target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
   endif()

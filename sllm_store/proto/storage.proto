@@ -11,6 +11,14 @@ service Storage {
 
   rpc RegisterModel (RegisterModelRequest) returns (RegisterModelResponse) {}
   rpc GetServerConfig (GetServerConfigRequest) returns (GetServerConfigResponse) {}
+  rpc GetPid (GetPidRequest) returns (GetPidResponse) {}
+}
+
+message GetPidRequest {
+}
+
+message GetPidResponse {
+  int32 pid = 1;
 }
 
 message GetServerConfigRequest {
