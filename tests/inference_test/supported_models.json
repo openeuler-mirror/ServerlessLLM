@@ -1,0 +1,10 @@
+{
+    "facebook/opt-1.3b": {
+        "can_store": true,
+        "can_inference": true
+    },
+    "Qwen/Qwen2.5-1.5B": {
+        "can_store": true,
+        "can_inference": true
+    }
+}
